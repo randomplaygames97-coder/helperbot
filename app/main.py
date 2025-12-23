@@ -205,7 +205,7 @@ database_available = initialize_database()
 
 # Import models directly (with --chdir, the root directory is in Python path)
 from .models import UptimePing, create_tables
-import models
+from . import models
 if SessionLocal:
     models.SessionLocal = SessionLocal
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Script per deployare tutte le modifiche al repository GitHub
-https://github.com/flyerix/erixbot/tree/main
+https://github.com/randomplaygames97-coder/helperbot/tree/main
 """
 
 import os
@@ -25,7 +25,7 @@ def run_command(command, description):
 def main():
     """Funzione principale per il deploy"""
     print("🚀 Inizio deploy delle modifiche al repository GitHub")
-    print("📁 Repository: https://github.com/flyerix/erixbot/tree/main")
+    print("📁 Repository: https://github.com/randomplaygames97-coder/helperbot/tree/main")
     print()
     
     # Verifica che siamo nella directory corretta
@@ -40,11 +40,11 @@ def main():
     if not os.path.exists('.git'):
         print("📁 Inizializzazione repository Git...")
         run_command('git init', "Inizializzazione Git")
-        run_command(f'git remote add origin https://{github_token}@github.com/flyerix/erixbot.git', "Aggiunta remote origin con autenticazione")
+        run_command(f'git remote add origin https://{github_token}@github.com/randomplaygames97-coder/helperbot.git', "Aggiunta remote origin con autenticazione")
         run_command('git branch -M main', "Configurazione branch main")
     else:
         # Configura autenticazione per repository esistente
-        run_command(f'git remote set-url origin https://{github_token}@github.com/flyerix/erixbot.git', "Configurazione autenticazione GitHub")
+        run_command(f'git remote set-url origin https://{github_token}@github.com/randomplaygames97-coder/helperbot.git', "Configurazione autenticazione GitHub")
     
     # Lista dei file modificati e nuovi
     modified_files = [
@@ -218,7 +218,7 @@ Deploy: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"""
     
     print()
     print("🎉 Deploy completato con successo!")
-    print("📁 Repository aggiornato: https://github.com/flyerix/erixbot")
+    print("📁 Repository aggiornato: https://github.com/randomplaygames97-coder/helperbot")
     print()
     print("📋 RIEPILOGO COMPLETO MIGLIORIE DEPLOYATE:")
     print("✅ 📊 Advanced Analytics Dashboard - Real-time charts e web interface")

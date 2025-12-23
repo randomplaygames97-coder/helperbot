@@ -2,10 +2,13 @@ from typing import Optional, Dict, List, Any
 from functools import lru_cache
 import hashlib
 from datetime import datetime, timezone, timedelta
-from openai import OpenAI
 import os
 from collections import defaultdict
 import logging
+import json
+import re
+from sqlalchemy.orm import Session
+from app.models import SessionLocal, AIKnowledge
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +144,124 @@ class AIResponseCache:
 # Global AI response cache
 ai_response_cache = AIResponseCache()
 
+class LearningSystem:
+    def __init__(self):
+        self.db_session = None
+
+    def _get_session(self) -> Session:
+        """Get database session, initializing if needed"""
+        if self.db_session is None:
+            if SessionLocal is None:
+                raise RuntimeError("Database session not initialized")
+            self.db_session = SessionLocal()
+        return self.db_session
+
+    def extract_keywords(self, text: str) -> List[str]:
+        """Extract keywords from text using regex patterns"""
+        # Common Italian keywords for the bot's domain
+        keywords = []
+
+        # Convert to lowercase for matching
+        text_lower = text.lower()
+
+        # Extract words longer than 3 characters, excluding common stop words
+        stop_words = {'il', 'la', 'lo', 'i', 'gli', 'le', 'un', 'una', 'uno', 'di', 'a', 'da', 'in', 'con', 'su', 'per', 'tra', 'fra', 'che', 'chi', 'come', 'dove', 'quando', 'perché', 'cosa', 'quale', 'quanto', 'e', 'o', 'ma', 'se', 'non', 'si', 'no', 'sì', 'io', 'tu', 'lui', 'lei', 'noi', 'voi', 'loro'}
+        words = re.findall(r'\b\w{4,}\b', text_lower)
+        keywords.extend([word for word in words if word not in stop_words])
+
+        # Extract specific patterns like dates, numbers, etc.
+        # Add domain-specific keywords
+        domain_keywords = ['lista', 'list', 'rinnovo', 'renewal', 'scadenza', 'expiry', 'ticket', 'supporto', 'aiuto', 'problema', 'errore', 'notifica', 'notification', 'cancellazione', 'deletion', 'richiesta', 'request']
+        for keyword in domain_keywords:
+            if keyword in text_lower:
+                keywords.append(keyword)
+
+        return list(set(keywords))  # Remove duplicates
+
+    def find_matching_patterns(self, keywords: List[str], threshold: float = 0.3) -> List[Dict[str, Any]]:
+        """Find matching patterns in AI knowledge base"""
+        try:
+            session = self._get_session()
+            all_knowledge = session.query(AIKnowledge).all()
+            matches = []
+
+            for knowledge in all_knowledge:
+                stored_keywords = json.loads(knowledge.keywords) if knowledge.keywords else []
+                # Calculate similarity based on keyword overlap
+                intersection = set(keywords) & set(stored_keywords)
+                union = set(keywords) | set(stored_keywords)
+                if union:
+                    similarity = len(intersection) / len(union)
+                    if similarity >= threshold:
+                        matches.append({
+                            'id': knowledge.id,
+                            'problem_key': knowledge.problem_key,
+                            'solution_text': knowledge.solution_text,
+                            'success_count': knowledge.success_count,
+                            'similarity': similarity,
+                            'keywords': stored_keywords
+                        })
+
+            # Sort by success_count and similarity
+            matches.sort(key=lambda x: (x['success_count'], x['similarity']), reverse=True)
+            return matches[:5]  # Return top 5 matches
+
+        except Exception as e:
+            logger.error(f"Error finding matching patterns: {e}")
+            return []
+
+    def learn_from_ticket(self, problem_description: str, solution_text: str):
+        """Learn from a resolved ticket"""
+        try:
+            session = self._get_session()
+            keywords = self.extract_keywords(problem_description)
+            problem_key = '_'.join(sorted(keywords[:3]))  # Create a key from top keywords
+
+            # Check if similar knowledge already exists
+            existing = session.query(AIKnowledge).filter_by(problem_key=problem_key).first()
+
+            if existing:
+                # Update existing knowledge
+                existing.solution_text = solution_text
+                existing.success_count += 1
+                existing.keywords = json.dumps(keywords)
+                existing.updated_at = datetime.now(timezone.utc)
+            else:
+                # Create new knowledge entry
+                new_knowledge = AIKnowledge(
+                    problem_key=problem_key,
+                    solution_text=solution_text,
+                    success_count=1,
+                    keywords=json.dumps(keywords)
+                )
+                session.add(new_knowledge)
+
+            session.commit()
+            logger.info(f"Learned from ticket: {problem_key}")
+
+        except Exception as e:
+            logger.error(f"Error learning from ticket: {e}")
+            if self.db_session:
+                self.db_session.rollback()
+
+    def get_response(self, problem_description: str) -> Optional[str]:
+        """Generate response based on learned patterns"""
+        try:
+            keywords = self.extract_keywords(problem_description)
+            matches = self.find_matching_patterns(keywords)
+
+            if matches:
+                # Use the best match
+                best_match = matches[0]
+                response = f"Basandomi su esperienze precedenti, ecco una possibile soluzione:\n\n{best_match['solution_text']}\n\nQuesta soluzione ha funzionato {best_match['success_count']} volta/e."
+                return response
+            else:
+                return "Non ho ancora una soluzione specifica per questo problema. Un amministratore ti assisterà presto."
+
+        except Exception as e:
+            logger.error(f"Error generating response: {e}")
+            return "Si è verificato un errore nel generare la risposta. Un amministratore ti assisterà presto."
+
 @lru_cache(maxsize=100)
 def get_cached_ai_response(problem_hash: str, context_hash: str) -> Optional[str]:
     """Cache AI responses based on problem and context"""
@@ -152,108 +273,29 @@ def generate_content_hash(content: str) -> str:
 
 class EnhancedAIService:
     def __init__(self):
-        api_key = os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            # Initialize without client for testing/development
-            self.client = None
-        else:
-            self.client = OpenAI(api_key=api_key)
         self.conversation_manager = AIConversationManager()
-        self.model = "gpt-3.5-turbo"
-        self.max_tokens = 400
+        self.learning_system = LearningSystem()
 
     def get_ai_response(self, problem_description: str, is_followup: bool = False, ticket_id: Optional[int] = None, user_id: Optional[int] = None) -> Optional[str]:
-        """Get AI response with enhanced context and caching"""
+        """Get AI response using learning system"""
         try:
-            # Return mock response if no client (for testing)
-            if not self.client:
-                return "Risposta AI simulata per test - configurare OPENAI_API_KEY per risposte reali."
+            # Use learning system to get response
+            response = self.learning_system.get_response(problem_description)
 
-            # Check cache first
-            problem_hash = generate_content_hash(problem_description)
-            context_hash = "none"
+            # Update conversation context if ticket_id provided
             if ticket_id:
-                context = self.conversation_manager.get_context(ticket_id)
-                context_hash = generate_content_hash(str(context))
+                self.conversation_manager.add_message(ticket_id, "user", problem_description)
+                self.conversation_manager.add_message(ticket_id, "assistant", response or "")
 
-            cached_response = get_cached_ai_response(problem_hash, context_hash)
-            if cached_response:
-                # Update metrics for cache hit
-                if hasattr(self, 'metrics_collector'):
-                    self.metrics_collector.record_ai_response(0.0, cached=True)
-                return cached_response
-
-            system_prompt = """Sei un assistente tecnico specializzato nel supporto clienti per un'applicazione installata su Amazon Firestick.
-
-La nostra applicazione offre contenuti streaming premium. Gli utenti possono avere problemi con:
-
-🔧 **Problemi Comuni Firestick:**
-• Applicazione che non si avvia
-• Video che si blocca o buffering
-• Audio fuori sincrono
-• Login che non funziona
-• Aggiornamenti che falliscono
-• Connessione internet instabile
-• Problemi di compatibilità Firestick
-
-🔧 **Problemi Comuni App:**
-• Contenuto che non carica
-• Qualità video bassa
-• Sottotitoli che non funzionano
-• Account bloccato/sospeso
-• Pagamenti non elaborati
-• Liste di riproduzione vuote
-
-📋 **Procedure Standard:**
-1. Riavvia l'applicazione
-2. Riavvia il Firestick (premi e tieni Select + Play per 5 secondi)
-3. Controlla connessione internet (minimo 10 Mbps)
-4. Cancella cache dell'app
-5. Verifica aggiornamenti disponibili
-6. Controlla spazio di archiviazione Firestick
-
-Rispondi SEMPRE in italiano, in modo amichevole e professionale. Se il problema è troppo complesso o richiede intervento manuale, dì chiaramente "Questo problema richiede assistenza tecnica specializzata. Un tecnico ti contatterà presto."
-
-NON dire mai "non posso aiutare" - invece guida l'utente attraverso i passaggi di risoluzione."""
-
-            messages = [{"role": "system", "content": system_prompt}]
-
-            # Add conversation history for context
-            if is_followup and ticket_id:
-                history = self.conversation_manager.get_context(ticket_id)
-                for msg in history[-6:]:  # Last 6 messages for context
-                    messages.append(msg)
-
-            messages.append({"role": "user", "content": f"Problema: {problem_description}"})
-
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=self.max_tokens
-            )
-
-            ai_text = response.choices[0].message.content.strip()
-
-            # Cache the response
-            ai_response_cache.set(problem_hash, context_hash, ai_text)
-
-            # Se l'AI dice che non può risolvere, restituisci None per escalation
-            escalation_keywords = [
-                "richiede assistenza tecnica specializzata",
-                "tecnico ti contatterà",
-                "non posso risolvere",
-                "troppo complesso",
-                "intervento manuale"
-            ]
-
-            if any(keyword in ai_text.lower() for keyword in escalation_keywords):
-                return None
-
-            return ai_text
+            return response
 
         except Exception as e:
-            print(f"AI response error: {e}")
-            return None
+            logger.error(f"Error in get_ai_response: {e}")
+            return "Si è verificato un errore nel sistema di supporto. Un amministratore ti assisterà presto."
+
+    def learn_from_ticket(self, problem_description: str, solution_text: str):
+        """Learn from a resolved ticket"""
+        self.learning_system.learn_from_ticket(problem_description, solution_text)
 
 # Global AI service instance
 ai_service = EnhancedAIService()
