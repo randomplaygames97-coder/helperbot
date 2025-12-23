@@ -77,8 +77,9 @@ if os.getenv('RENDER'):
     logger.info("✅ Using persistent SQLite database (no external dependencies)")
 
 # Environment validation
+is_render = 'RENDER_EXTERNAL_URL' in os.environ
 DATABASE_URL = os.getenv('DATABASE_URL')
-if not DATABASE_URL:
+if not DATABASE_URL and not is_render:
     logger.error("DATABASE_URL environment variable is required")
     raise ValueError("DATABASE_URL environment variable is required")
 
