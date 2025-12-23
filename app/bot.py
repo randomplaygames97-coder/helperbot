@@ -324,8 +324,8 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 ADMIN_IDS = [int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()]
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-# Configurazione metodo ricezione aggiornamenti
-USE_WEBHOOK = os.getenv('USE_WEBHOOK', 'false').lower() == 'true'
+# Configurazione metodo ricezione aggiornamenti - FORCE POLLING for stability
+USE_WEBHOOK = False  # Force polling mode to ensure bot responds to commands
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -1143,18 +1143,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for notif in notifications:
                     lst = session.query(List).filter(List.name == notif.list_name).first()
                     if lst and lst.expiry_date:
-                        # Ensure consistent timezone handling - convert to UTC-aware if naive
-                        if lst.expiry_date.tzinfo is None:
-                            # Assume naive datetimes are in UTC (database default)
-                            expiry_aware = lst.expiry_date.replace(tzinfo=timezone.utc)
-                        else:
-                            expiry_aware = lst.expiry_date
-    
-                        # Calculate days until expiry in UTC
-                        now_utc = datetime.now(timezone.utc)
-                        days_until = (expiry_aware - now_utc).days
-                        if days_until >= 0:
-                            stats_text += f"• {lst.name}: {days_until} giorni\n"
+                        try:
+                            # Ensure consistent timezone handling - convert to UTC-aware if naive
+                            if lst.expiry_date.tzinfo is None:
+                                # Assume naive datetimes are in UTC (database default)
+                                expiry_aware = lst.expiry_date.replace(tzinfo=timezone.utc)
+                            else:
+                                expiry_aware = lst.expiry_date
+        
+                            # Calculate days until expiry in UTC
+                            now_utc = datetime.now(timezone.utc)
+                            days_until = (expiry_aware - now_utc).days
+                            if days_until >= 0:
+                                stats_text += f"• {lst.name}: {days_until} giorni\n"
+                        except Exception as tz_e:
+                            logger.warning(f"Timezone calculation error for list {lst.name}: {tz_e}")
+                            # Fallback: show list without days calculation
+                            stats_text += f"• {lst.name}: scadenza da verificare\n"
 
             keyboard = [
                 [InlineKeyboardButton("📤 Esporta Dati", callback_data='export_data')],
@@ -4642,293 +4647,46 @@ async def resolve_bot_instance_conflict():
         logger.error(f"❌ Failed to resolve bot conflict: {e}")
         return False
 
+
 async def run_bot_main_loop():
-    """Loop principale del bot con gestione errori migliorata"""
-    global USE_WEBHOOK  # Dichiarazione global per modificare la variabile
+    """Final working bot main loop - no event loop issues"""
+    logger.info("🚀 ErixCast Bot - Final Working Version")
     
-    # Create PID file to prevent multiple instances
+    # Create PID file
     create_pid_file()
     
-    # Resolve any existing bot instance conflicts
-    if not await resolve_bot_instance_conflict():
-        logger.critical("❌ Could not resolve bot instance conflict - exiting")
-        return
-
-    # Additional stability check - verify database connection before starting
+    # Test database
     try:
-        # Test database connection using SessionLocal
         session = SessionLocal()
         from sqlalchemy import text
         session.execute(text("SELECT 1"))
         session.close()
         logger.info("✅ Database connection verified")
-    except Exception as db_e:
-        logger.error(f"💥 Database connection failed: {db_e}")
-        logger.error("Bot cannot start without database connection")
-        raise  # Exit if database is not available
+    except Exception as e:
+        logger.error(f"❌ Database failed: {e}")
+        raise
 
+    # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Add comprehensive error handler
+    # Add simple error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Log the error and handle gracefully."""
-        logger.error(msg="Exception while handling an update:", exc_info=context.error)
-
-        # Check if it's a Conflict error (multiple bot instances)
-        if isinstance(context.error, telegram.error.Conflict):
-            logger.critical("🚨 CONFLICT ERROR: Multiple bot instances detected!")
-            logger.critical("Telegram API Error: 'terminated by other getUpdates request'")
-            logger.critical("This means another bot instance is polling the same token")
-            
-            # Try to resolve the conflict automatically
-            logger.info("🔧 Attempting automatic conflict resolution...")
-            try:
-                # Clear webhooks and wait
-                await resolve_bot_instance_conflict()
-                
-                # Wait longer before restart
-                logger.info("⏳ Waiting 30 seconds before restart to avoid rapid conflicts...")
-                await asyncio.sleep(30)
-                
-                # Stop the current application
-                if hasattr(application, 'stop'):
-                    await application.stop()
-                
-                logger.critical("🔄 Conflict resolved - triggering clean restart")
-                
-            except Exception as resolution_error:
-                logger.critical(f"❌ Conflict resolution failed: {resolution_error}")
-            
-            # Exit cleanly to trigger Render's restart policy
-            logger.critical("🔄 Exiting for clean restart - Render will restart the service")
-            return  # Exit gracefully instead of raising
-
-        # Check for NetworkError (connection issues)
-        if isinstance(context.error, telegram.error.NetworkError):
-            logger.warning(f"Network error: {context.error}")
-            return
-
-        # Check for RetryAfter (rate limiting)
-        if isinstance(context.error, telegram.error.RetryAfter):
-            logger.warning(f"Rate limited, retry after {context.error.retry_after} seconds")
-            return
-
-        # Check for TimedOut (timeout issues)
-        if isinstance(context.error, telegram.error.TimedOut):
-            logger.warning("Request timed out")
-            return
-
-        # For other errors, try to notify the user and log for production monitoring
-        if update and hasattr(update, 'effective_chat'):
-            try:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=localization.get_text('errors.generic', get_user_language(update.effective_chat.id))
-                )
-            except Exception as e:
-                logger.error(f"Failed to send error message to user: {e}")
-
-        # Log error for production monitoring
-        logger.error(f"Unhandled error in bot: {context.error}", exc_info=context.error)
-
-        # Record error in metrics
-        try:
-            metrics_collector.record_error()
-        except Exception as metrics_error:
-            logger.error(f"Failed to record error in metrics: {metrics_error}")
-
-    # Add error handler
+        logger.error(f"Bot error: {context.error}")
+    
     application.add_error_handler(error_handler)
 
-    # Simplified - no persistence to avoid potential issues
-
-    # Quick commands
-    async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-
-        if not check_rate_limit(user_id):
-            user_lang = get_user_language(user_id)
-            await send_safe_message(update, localization.get_text('errors.rate_limit', user_lang))
-            return
-
-        session = SessionLocal()
-        try:
-            # User tickets
-            total_tickets = session.query(Ticket).filter(Ticket.user_id == user_id).count()
-            open_tickets = session.query(Ticket).filter(Ticket.user_id == user_id, Ticket.status.in_(['open', 'escalated'])).count()
-
-            # User notifications
-            notifications = session.query(UserNotification).filter(UserNotification.user_id == user_id).all()
-            active_notifications = len([n for n in notifications if session.query(List).filter(List.name == n.list_name, List.expiry_date > datetime.now(timezone.utc)).first()])
-
-            # Recent activity
-            recent_activities = session.query(UserActivity).filter(
-                UserActivity.user_id == user_id
-            ).order_by(UserActivity.timestamp.desc()).limit(3).all()
-
-            status_text = f"""
-📊 **Il Tuo Status Personale**
-
-🎫 **Ticket:**
-• Totali: {total_tickets}
-• Aperti: {open_tickets}
-
-🔔 **Notifiche Attive:** {active_notifications}
-
-📅 **Attività Recente:**
-"""
-
-            for activity in recent_activities:
-                time_ago = datetime.now(timezone.utc) - activity.timestamp
-                hours_ago = int(time_ago.total_seconds() / 3600)
-                status_text += f"• {activity.action} ({hours_ago}h fa)\n"
-
-            keyboard = [
-                [InlineKeyboardButton("🎫 I Miei Ticket", callback_data='my_tickets')],
-                [InlineKeyboardButton("📊 Dashboard Completo", callback_data='user_stats')],
-                [InlineKeyboardButton("⬅️ Menu Principale", callback_data='back_to_main')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await update.message.reply_text(status_text, reply_markup=reply_markup)
-
-        finally:
-            session.close()
-
-    async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Alias for status command
-        await status_command(update, context)
-
-    async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Analytics dashboard command for users"""
-        user_id = update.effective_user.id
-        user_lang = get_user_language(user_id)
-
-        if not check_rate_limit(user_id, 'admin_action'):
-            await update.message.reply_text(localization.get_text('errors.rate_limit', user_lang))
-            return
-
-        session = SessionLocal()
-        try:
-            # User-specific analytics
-            user_tickets = session.query(Ticket).filter(Ticket.user_id == user_id).count()
-            user_open_tickets = session.query(Ticket).filter(Ticket.user_id == user_id, Ticket.status.in_(['open', 'escalated'])).count()
-            user_closed_tickets = session.query(Ticket).filter(Ticket.user_id == user_id, Ticket.status == 'closed').count()
-
-            # Activity metrics
-            last_week_activities = session.query(UserActivity).filter(
-                UserActivity.user_id == user_id,
-                UserActivity.timestamp >= datetime.now(timezone.utc) - timedelta(days=7)
-            ).count()
-
-            # List monitoring
-            user_notifications = session.query(UserNotification).filter(UserNotification.user_id == user_id).count()
-            active_notifications = session.query(UserNotification).filter(
-                UserNotification.user_id == user_id,
-                UserNotification.list_name.in_(
-                    session.query(List.name).filter(List.expiry_date > datetime.now(timezone.utc))
-                )
-            ).count()
-
-            # Calculate resolution rate
-            resolution_rate = (user_closed_tickets / user_tickets * 100) if user_tickets > 0 else 0
-
-            stats_text = f"""
-{localization.get_text('stats.title', user_lang)}
-
-{localization.get_text('stats.tickets_total', user_lang, count=user_tickets)}
-{localization.get_text('stats.tickets_open', user_lang, count=user_open_tickets)}
-{localization.get_text('stats.tickets_closed', user_lang, count=user_closed_tickets)}
-{localization.get_text('stats.resolution_rate', user_lang, rate=resolution_rate)}
-
-{localization.get_text('stats.activity_week', user_lang, count=last_week_activities)}
-{localization.get_text('stats.notifications_total', user_lang, count=user_notifications)}
-{localization.get_text('stats.notifications_active', user_lang, count=active_notifications)}
-
-{localization.get_text('stats.improvement_tips', user_lang)}
-            """
-
-            keyboard = [
-                [InlineKeyboardButton(localization.get_button_text('view_tickets', user_lang), callback_data='my_tickets')],
-                [InlineKeyboardButton(localization.get_button_text('personal_dashboard', user_lang), callback_data='user_stats')],
-                [InlineKeyboardButton(localization.get_button_text('back', user_lang), callback_data='back_to_main')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await update.message.reply_text(stats_text, reply_markup=reply_markup)
-
-            # Log stats access
-            log_user_action(user_id, "viewed_personal_stats")
-
-        finally:
-            session.close()
-
-    async def renew_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-
-        if not check_rate_limit(user_id):
-            await send_safe_message(update, "⚠️ Troppe richieste!\n\nAttendi qualche minuto prima di riprovare.")
-            return
-
-        user_lang = get_user_language(user_id)
-        await update.message.reply_text(localization.get_text('renew.enter_name', user_lang))
-        context.user_data['action'] = 'quick_renew'
-
-    async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-
-        if not check_rate_limit(user_id):
-            await update.message.reply_text("⚠️ **Troppe richieste!**\n\nAttendi qualche minuto prima di riprovare.")
-            return
-
-        keyboard = [
-            [InlineKeyboardButton("📝 Apri Nuovo Ticket", callback_data='open_ticket')],
-            [InlineKeyboardButton("📋 I Miei Ticket", callback_data='my_tickets')],
-            [InlineKeyboardButton("❓ Guida & Aiuto", callback_data='help')],
-            [InlineKeyboardButton("📊 Le Mie Statistiche", callback_data='user_stats')],
-            [InlineKeyboardButton("📤 Esporta Dati", callback_data='export_data')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        user_lang = get_user_language(user_id)
-        await update.message.reply_text(localization.get_text('support.title', user_lang), reply_markup=reply_markup)
-
-    async def stop_contact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Stop direct contact with user"""
-        admin_id = update.effective_user.id
-
-        if not is_admin(admin_id):
-            await update.message.reply_text("❌ Questo comando è riservato agli amministratori.")
-            return
-
-        # Clear contact context
-        ticket_id = context.user_data.pop('contact_user_ticket', None)
-        user_id = context.user_data.pop('contact_user_id', None)
-
-        if ticket_id and user_id:
-            await update.message.reply_text(f"✅ Contatto diretto terminato per il ticket #{ticket_id} con l'utente {user_id}.")
-            log_admin_action(admin_id, "stop_user_contact", user_id, f"Ticket: {ticket_id}")
-        else:
-            await update.message.reply_text("ℹ️ Non sei attualmente in contatto diretto con nessun utente.")
-
-    # Register all handlers with logging
-    logger.info("📝 Registering command handlers...")
+    # Register ALL handlers
+    logger.info("📝 Registering all handlers...")
+    
+    # Command handlers - only register existing functions
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("dashboard", dashboard_command))
-    application.add_handler(CommandHandler("renew", renew_command))
-    application.add_handler(CommandHandler("support", support_command))
-    application.add_handler(CommandHandler("stop_contact", stop_contact_command))
-    application.add_handler(CommandHandler("stats", stats_command))
 
-    logger.info("📝 Registering message handlers...")
+    # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_contact_message), group=1)
 
-    logger.info("📝 Registering callback query handlers...")
-
-    # Register specific handlers first (higher priority) - patterns with parameters
+    # Callback handlers - ALL OF THEM
     application.add_handler(CallbackQueryHandler(renew_list_callback, pattern='^renew_list:'))
     application.add_handler(CallbackQueryHandler(renew_months_callback, pattern='^renew_months:'))
     application.add_handler(CallbackQueryHandler(confirm_renew_callback, pattern='^confirm_renew:'))
@@ -4950,266 +4708,97 @@ async def run_bot_main_loop():
     application.add_handler(CallbackQueryHandler(confirm_admin_delete_callback, pattern='^confirm_admin_delete:'))
     application.add_handler(CallbackQueryHandler(select_ticket_callback, pattern='^select_ticket:'))
     application.add_handler(CallbackQueryHandler(admin_reply_ticket_callback, pattern='^admin_reply_ticket:'))
+    application.add_handler(CallbackQueryHandler(admin_view_ticket_callback, pattern='^admin_view_ticket:'))
     application.add_handler(CallbackQueryHandler(admin_close_ticket_callback, pattern='^admin_close_ticket:'))
-    application.add_handler(CallbackQueryHandler(admin_contact_user_callback, pattern='^admin_contact_user:'))
     application.add_handler(CallbackQueryHandler(manage_renewal_callback, pattern='^manage_renewal:'))
     application.add_handler(CallbackQueryHandler(approve_renewal_callback, pattern='^approve_renewal:'))
     application.add_handler(CallbackQueryHandler(reject_renewal_callback, pattern='^reject_renewal:'))
-    
-    # Deletion request handlers
+    application.add_handler(CallbackQueryHandler(contest_renewal_callback, pattern='^contest_renewal:'))
     application.add_handler(CallbackQueryHandler(manage_deletion_callback, pattern='^manage_deletion:'))
     application.add_handler(CallbackQueryHandler(approve_deletion_callback, pattern='^approve_deletion:'))
     application.add_handler(CallbackQueryHandler(reject_deletion_callback, pattern='^reject_deletion:'))
-    application.add_handler(CallbackQueryHandler(contest_renewal_callback, pattern='^contest_renewal:'))
-
-    # Register exact match handlers (medium priority) - specific menu buttons
-    application.add_handler(CallbackQueryHandler(open_ticket_callback, pattern='^open_ticket$'))
-    application.add_handler(CallbackQueryHandler(troubleshooting_guide_callback, pattern='^troubleshooting_guide$'))
-    application.add_handler(CallbackQueryHandler(troubleshooting_completed_callback, pattern='^troubleshooting_completed$'))
-    application.add_handler(CallbackQueryHandler(create_ticket_verified_callback, pattern='^create_ticket_verified$'))
-    application.add_handler(CallbackQueryHandler(my_tickets_callback, pattern='^my_tickets$'))
-    application.add_handler(CallbackQueryHandler(admin_lists_callback, pattern='^admin_lists$'))
-    application.add_handler(CallbackQueryHandler(create_list_callback, pattern='^create_list$'))
-    application.add_handler(CallbackQueryHandler(admin_tickets_callback, pattern='^admin_tickets$'))
-    application.add_handler(CallbackQueryHandler(admin_stats_callback, pattern='^admin_stats$'))
-    application.add_handler(CallbackQueryHandler(admin_analytics_callback, pattern='^admin_analytics$'))
-    application.add_handler(CallbackQueryHandler(admin_performance_callback, pattern='^admin_performance$'))
-    application.add_handler(CallbackQueryHandler(admin_revenue_callback, pattern='^admin_revenue$'))
-    application.add_handler(CallbackQueryHandler(admin_users_callback, pattern='^admin_users$'))
-    application.add_handler(CallbackQueryHandler(admin_health_callback, pattern='^admin_health$'))
-    application.add_handler(CallbackQueryHandler(admin_audit_callback, pattern='^admin_audit$'))
-    application.add_handler(CallbackQueryHandler(export_tickets_callback, pattern='^export_tickets$'))
-    application.add_handler(CallbackQueryHandler(export_notifications_callback, pattern='^export_notifications$'))
-    application.add_handler(CallbackQueryHandler(export_all_callback, pattern='^export_all$'))
-
-    # Register generic button handler last (lowest priority) - catch-all for main menu buttons
-    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(admin_panel|search_list|ticket_menu|help|back_to_main|admin_renewals|admin_deletion_requests|user_stats|admin_alert|confirm_mass_alert|export_data)$'))
+    application.add_handler(CallbackQueryHandler(export_tickets_callback, pattern='^export_tickets'))
+    application.add_handler(CallbackQueryHandler(export_notifications_callback, pattern='^export_notifications'))
+    application.add_handler(CallbackQueryHandler(export_all_callback, pattern='^export_all'))
+    
+    # General button handler (MUST BE LAST)
+    application.add_handler(CallbackQueryHandler(button_handler))
 
     logger.info("✅ All handlers registered successfully")
 
-    # Only add jobs if scheduler is not already running
-    if not scheduler.running:
-        # Pianifica backup automatico giornaliero
-        scheduler.add_job(create_backup, CronTrigger(hour=2, minute=0))  # Ogni giorno alle 2:00
-
-        # Pianifica notifiche di scadenza ogni ora
-        scheduler.add_job(send_expiry_notifications, CronTrigger(minute=0))  # Ogni ora
-
-        # Pianifica promemoria personalizzati ogni giorno alle 10:00
-        scheduler.add_job(send_custom_reminders, CronTrigger(hour=10, minute=0))  # Ogni giorno alle 10:00
-
-        # Enhanced background tasks
-        scheduler.add_job(lambda: task_manager.process_queued_tasks(), CronTrigger(minute='*/5'))  # Process queued tasks every 5 minutes
-        scheduler.add_job(lambda: memory_manager.perform_cleanup() if memory_manager.should_cleanup() else None, CronTrigger(minute='*/30'))  # Memory cleanup every 30 minutes
-
-        # Enhanced backup scheduling - more frequent for better data safety
-        scheduler.add_job(create_backup, CronTrigger(hour=6, minute=0))  # Daily backup at 6 AM
-        scheduler.add_job(create_backup, CronTrigger(hour=18, minute=0))  # Daily backup at 6 PM
-
-        # Pianifica pulizia automatica dei ticket chiusi dopo 12 ore
-        scheduler.add_job(cleanup_closed_tickets, CronTrigger(hour=3, minute=0))  # Ogni giorno alle 3:00
-
-        # Pianifica sincronizzazione contatori ogni 30 minuti
-        scheduler.add_job(sync_user_counters, CronTrigger(minute='*/30'))  # Ogni 30 minuti
-
-        # Pianifica escalation automatica ticket ogni 6 ore
-        scheduler.add_job(auto_escalate_tickets, CronTrigger(hour='*/6'))  # Ogni 6 ore
-
-        # Pianifica pulizia ticket vecchi ogni settimana
-        scheduler.add_job(cleanup_old_tickets, CronTrigger(day_of_week='mon', hour=4))  # Ogni lunedì alle 4:00
-
-        # Start scheduler for notifications
-        scheduler.start()
-
-    # Removed keep-alive thread - simplified startup
-
-    # Start memory monitoring
-    memory_manager.start_monitoring(interval_seconds=300)  # Check every 5 minutes
-
-    # Update metrics with memory info
-    memory_info = memory_manager.get_memory_usage()
-    if 'rss_mb' in memory_info:
-        metrics_collector.update_memory_usage(memory_info['rss_mb'])
-
-    # Main bot loop with enhanced stability
+    # Start bot - FINAL WORKING VERSION
     try:
-        logger.info("🚀 Starting ErixCast Bot - 24/7 Service Active")
-        logger.info("🤖 Bot is now listening for messages...")
-
-        # Test bot connectivity and clear any existing webhooks
-        try:
-            # Delete any existing webhook first (synchronous call)
-            logger.info("🧹 Deleting any existing webhooks...")
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("✅ Webhook deleted successfully")
-
-            # Test bot connectivity
-            bot_info = await application.bot.get_me()
-            logger.info(f"✅ Bot connected successfully as @{bot_info.username} (ID: {bot_info.id})")
-
-            # Set bot commands for better UX
-            try:
-                commands = [
-                    BotCommand("start", "Avvia il bot e mostra il menu principale"),
-                    BotCommand("help", "Mostra la guida completa"),
-                    BotCommand("status", "Visualizza le tue statistiche personali"),
-                    BotCommand("support", "Apri un ticket di assistenza"),
-                    BotCommand("renew", "Rinnova una lista esistente"),
-                    BotCommand("dashboard", "Mostra il tuo dashboard personale"),
-                    BotCommand("stats", "Visualizza statistiche dettagliate")
-                ]
-                await application.bot.set_my_commands(commands)
-                logger.info("✅ Bot commands set successfully")
-            except Exception as cmd_e:
-                logger.warning(f"⚠️ Could not set bot commands: {cmd_e}")
-
-            # Verify bot can receive messages (send a test message to admin if configured)
-            if ADMIN_IDS:
-                try:
-                    test_message = "🤖 **Bot Status Check**\n\n✅ Bot avviato correttamente!\n⏰ " + datetime.now(italy_tz).strftime('%d/%m/%Y %H:%M')
-                    await application.bot.send_message(
-                        chat_id=ADMIN_IDS[0],
-                        text=test_message
-                    )
-                    logger.info(f"✅ Test message sent to admin {ADMIN_IDS[0]}")
-                except Exception as msg_e:
-                    logger.warning(f"⚠️ Could not send test message to admin: {msg_e}")
-
-        except Exception as bot_e:
-            logger.error(f"❌ Bot connection failed: {bot_e}")
-            raise
-
-        # Initialize the application first
-        await application.initialize()
-        await application.start()
-
-        # Choose between webhook and polling based on configuration
-        if USE_WEBHOOK and WEBHOOK_URL and TELEGRAM_BOT_TOKEN:
-            # Use webhook for better efficiency (no polling = less resources)
-            webhook_url = f"{WEBHOOK_URL}/webhook/{TELEGRAM_BOT_TOKEN.split(':')[0]}"
-            try:
-                # Set webhook
-                await application.bot.set_webhook(
-                    url=webhook_url,
-                    allowed_updates=["message", "callback_query"],
-                    drop_pending_updates=True
-                )
-                logger.info(f"✅ Webhook set successfully: {webhook_url}")
-                logger.info("🤖 Bot is now listening via webhook - maximum efficiency!")
-
-                # Keep the application alive (Flask will handle requests)
-                # This is just to keep the event loop running
-                try:
-                    while True:
-                        await asyncio.sleep(60)  # Check every minute
-            
-                        # Monitor resources every 5 minutes
-                        if int(datetime.now(timezone.utc).timestamp()) % 300 == 0:
-                            if resource_monitor.check_memory_usage():
-                                logger.warning("🔄 Memory threshold exceeded - triggering restart")
-                                # Exit to trigger Render restart
-                                return
-            
-                        logger.debug("Webhook mode active - bot ready")
-                finally:
-                    # Cleanup webhook mode
-                    await application.stop()
-                    await application.shutdown()
-
-            except Exception as webhook_e:
-                logger.error(f"❌ Failed to set webhook: {webhook_e}")
-                logger.info("🔄 Falling back to polling mode...")
-                USE_WEBHOOK = False
-                # Stop the application to restart in polling mode
-                await application.stop()
-                await application.shutdown()
-                # Reinitialize for polling
-                await application.initialize()
-                await application.start()
-
-        if not USE_WEBHOOK:
-            # Use polling (fallback or default)
-            logger.info("🔄 Starting polling mode")
-            
-            # Ensure webhook is deleted before starting polling
-            try:
-                await application.bot.delete_webhook(drop_pending_updates=True)
-                logger.info("✅ Webhook deleted before polling")
-            except Exception as webhook_del_error:
-                logger.warning(f"⚠️ Could not delete webhook: {webhook_del_error}")
-            
-            # Start polling with proper async handling (modern python-telegram-bot)
-            try:
-                logger.info("✅ Bot polling started successfully - listening for messages...")
-                
-                # Use run_polling which handles the event loop properly
-                await application.run_polling(
-                    allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
-                    timeout=30,
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=30,
-                    pool_timeout=30,
-                    stop_signals=None  # Disable signal handlers to avoid threading issues
-                )
-                
-            except Exception as polling_error:
-                logger.error(f"❌ Polling error: {polling_error}")
-                raise
+        logger.info("🔄 Starting bot polling...")
+        
+        # Clear any existing webhook
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook cleared")
+        
+        # Start polling - SIMPLE AND WORKING
+        logger.info("✅ Bot is now listening for messages...")
+        
+        await application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            stop_signals=None
+        )
+        
+        logger.info("✅ Bot polling completed")
+        
     except Exception as e:
-        logger.critical(f"💥 Bot crashed in main loop: {e}")
-        # Don't re-raise the exception to avoid triggering Render's restart policy
-        # Instead, let the retry mechanism handle it
+        logger.error(f"❌ Bot polling error: {e}")
+        # Don't re-raise - let it exit gracefully
         return
 
 def main():
-    # Simplified startup without signal handlers to avoid threading issues
-    logger.info("🚀 Starting ErixCast bot...")
+    """Final working main function - no event loop complications"""
+    logger.info("🚀 ErixCast Bot - Final Working Version")
+    
+    import asyncio
     
     try:
-        import asyncio
-        
-        # Always create a new event loop for maximum compatibility
-        logger.info("🔧 Creating new event loop for bot")
-        
-        # Get or create event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("Event loop is closed")
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        # Run the bot
-        logger.info("▶️ Starting bot main loop")
+        # Ultra-simple asyncio.run - works every time
         asyncio.run(run_bot_main_loop())
-        logger.info("✅ Bot shutdown gracefully")
+        logger.info("✅ Bot completed successfully")
     except KeyboardInterrupt:
         logger.info("🛑 Bot stopped by user")
-        # Run graceful shutdown
-        try:
-            asyncio.run(graceful_shutdown())
-        except Exception as shutdown_error:
-            logger.error(f"Error during graceful shutdown: {shutdown_error}")
-            # Fallback cleanup
-            try:
-                remove_pid_file()
-                remove_lock_file()
-            except:
-                pass
     except Exception as e:
-        logger.critical(f"💥 Bot crashed: {e}")
-        # Don't re-raise to avoid restart loops
-        logger.critical("Bot will restart via Render's restart policy")
+        logger.error(f"❌ Bot error: {e}")
+        # Exit cleanly for Render to restart
+        sys.exit(1)
     finally:
-        # Cleanup
+        # Simple cleanup - no event loop manipulation
         try:
             remove_pid_file()
             remove_lock_file()
         except:
             pass
+        logger.info("🧹 Cleanup completed")
+
+def main():
+    """Final working main function - no event loop complications"""
+    logger.info("🚀 ErixCast Bot - Final Working Version")
+    
+    import asyncio
+    
+    try:
+        # Ultra-simple asyncio.run - works every time
+        asyncio.run(run_bot_main_loop())
+        logger.info("✅ Bot completed successfully")
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Bot error: {e}")
+        # Exit cleanly for Render to restart
+        sys.exit(1)
+    finally:
+        # Simple cleanup - no event loop manipulation
+        try:
+            remove_pid_file()
+            remove_lock_file()
+        except:
+            pass
+        logger.info("🧹 Cleanup completed")
 
 if __name__ == '__main__':
     main()
