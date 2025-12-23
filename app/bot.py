@@ -55,9 +55,12 @@ def database_operation(func):
 from utils.validation import sanitize_text
 from utils.rate_limiting import rate_limiter
 from utils.metrics import metrics_collector
-from services.ai_services import ai_service
+from services.ai_services import ai_service, LearningSystem
 from services.task_manager import task_manager
 from services.memory_manager import memory_manager
+
+# Initialize learning service
+learning_service = LearningSystem()
 # Import dei nuovi servizi (commentati per ora per evitare errori di import)
 # from services.analytics_service import analytics_service
 # from services.smart_ai_service import smart_ai_service
@@ -329,10 +332,6 @@ if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN is required but not set")
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
 
-if not OPENAI_API_KEY:
-    logger.error("❌ OPENAI_API_KEY is required but not set")
-    raise ValueError("OPENAI_API_KEY environment variable is required")
-
 if not ADMIN_IDS:
     logger.error("❌ ADMIN_IDS is required but not set")
     raise ValueError("ADMIN_IDS environment variable is required")
@@ -341,7 +340,7 @@ logger.info("✅ Environment variables validated successfully")
 
 # Rate limiting ora gestito dalla configurazione centralizzata
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 scheduler = AsyncIOScheduler()
 
@@ -1471,7 +1470,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ai_response = None
             try:
                 if description:
-                    ai_response = ai_service.get_ai_response(description, is_followup=False, ticket_id=int(ticket.id), user_id=user_id)
+                    ai_response = learning_service.get_response(description)
             except Exception as ai_e:
                 logger.warning(f"AI service failed for ticket {ticket.id}: {ai_e}")
                 ai_response = None
@@ -2015,7 +2014,7 @@ Grazie per aver completato la verifica preliminare!
                 ai_response = None
                 if message_text and ticket.ai_attempts < 2:
                     try:
-                        ai_response = ai_service.get_ai_response(message_text, is_followup=True, ticket_id=ticket_id, user_id=user_id)
+                        ai_response = learning_service.get_response(message_text)
                         # Increment AI attempts counter
                         ticket.ai_attempts += 1
                     except Exception as ai_e:
@@ -2141,6 +2140,11 @@ Grazie per aver completato la verifica preliminare!
             session.close()
 
 async def get_ai_response(problem_description, is_followup=False, ticket_id=None, user_id=None):
+    # If OpenAI is not available, return None to trigger escalation
+    if openai_client is None:
+        logger.info("OpenAI client not available - escalating to admin")
+        return None
+
     try:
         system_prompt = """Sei un assistente tecnico specializzato nel supporto clienti per un'applicazione installata su Amazon Firestick.
 
@@ -2225,7 +2229,8 @@ NON dire mai "non posso aiutare" - invece guida l'utente attraverso i passaggi d
 
             # Clean cache if too large
             if len(ai_context_cache) > MAX_CONTEXT_CACHE_SIZE:
-                oldest_user = min(ai_context_cache.keys(), key=lambda x: ai_context_cache[x]['last_interaction'])
+                oldest_user = min(ai_context_cache.keys(),
+                                key=lambda x: ai_context_cache[x]['last_interaction'])
                 del ai_context_cache[oldest_user]
 
         # Se l'AI dice che non può risolvere, restituisci None per escalation
@@ -2245,7 +2250,6 @@ NON dire mai "non posso aiutare" - invece guida l'utente attraverso i passaggi d
         logger.error(f"AI response error: {e}")
         health_status['ai_service'] = False
         return None
-
 async def renew_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2711,18 +2715,7 @@ async def view_ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
         messages = session.query(TicketMessage).filter(TicketMessage.ticket_id == ticket_id).order_by(TicketMessage.created_at).all()
 
-        # Generate AI summary if ticket has many messages
-        summary = ""
-        if len(messages) > 3:
-            try:
-                conversation_text = "\n".join([f"{msg.message}" for msg in messages[-5:]])  # Last 5 messages
-                summary = ai_service.generate_ticket_summary(ticket.title, conversation_text, user_lang)
-                if summary:
-                    summary = f"\n📋 **{localization.get_text('ticket.summary', user_lang)}**\n{summary}\n\n"
-            except Exception as e:
-                logger.warning(f"Failed to generate ticket summary: {e}")
-
-        ticket_text = f"{localization.get_text('ticket.details', user_lang, id=ticket.id, title=ticket.title, description=ticket.description, status=ticket.status)}\n\n{summary}💬 **{localization.get_text('ticket.messages', user_lang)}**\n\n"
+        ticket_text = f"{localization.get_text('ticket.details', user_lang, id=ticket.id, title=ticket.title, description=ticket.description, status=ticket.status)}\n\n💬 **{localization.get_text('ticket.messages', user_lang)}**\n\n"
 
         for msg in messages:
             sender = "🤖 AI" if msg.is_ai else ("👑 Admin" if msg.is_admin else "👤 Tu")
@@ -2786,7 +2779,7 @@ async def handle_ticket_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Try AI response first for the follow-up
         if message_text:
-            ai_response = ai_service.get_ai_response(message_text, is_followup=True, ticket_id=ticket_id, user_id=user_id)
+            ai_response = learning_service.get_response(message_text)
         else:
             ai_response = None
         if ai_response:
@@ -2856,6 +2849,19 @@ async def close_ticket_callback(update: Update, context: ContextTypes.DEFAULT_TY
             ticket.status = 'closed'
             session.commit()
 
+            # Learn from the closed ticket
+            try:
+                # Get the last admin message as solution
+                last_admin_message = session.query(TicketMessage).filter(
+                    TicketMessage.ticket_id == ticket_id,
+                    TicketMessage.is_admin == True
+                ).order_by(TicketMessage.created_at.desc()).first()
+
+                if last_admin_message:
+                    learning_service.learn_from_ticket(ticket.description, last_admin_message.message)
+            except Exception as learn_e:
+                logger.warning(f"Failed to learn from ticket {ticket_id}: {learn_e}")
+
             await query.edit_message_text("✅ **Ticket chiuso con successo!**\n\nGrazie per aver utilizzato il nostro servizio. 🎉")
         else:
             await query.edit_message_text("❌ Ticket non trovato.")
@@ -2892,6 +2898,19 @@ async def close_ticket_user_callback(update: Update, context: ContextTypes.DEFAU
         if ticket:
             ticket.status = 'closed'
             session.commit()
+
+            # Learn from the closed ticket
+            try:
+                # Get the last admin message as solution
+                last_admin_message = session.query(TicketMessage).filter(
+                    TicketMessage.ticket_id == ticket_id,
+                    TicketMessage.is_admin == True
+                ).order_by(TicketMessage.created_at.desc()).first()
+
+                if last_admin_message:
+                    learning_service.learn_from_ticket(ticket.description, last_admin_message.message)
+            except Exception as learn_e:
+                logger.warning(f"Failed to learn from ticket {ticket_id}: {learn_e}")
 
             await query.edit_message_text("✅ **Ticket chiuso con successo!**\n\nGrazie per aver utilizzato il nostro servizio. 🎉")
         else:
@@ -3462,6 +3481,20 @@ async def admin_close_ticket_callback(update: Update, context: ContextTypes.DEFA
         if ticket:
             ticket.status = 'closed'
             session.commit()
+
+            # Learn from the closed ticket
+            try:
+                # Get the last admin message as solution
+                last_admin_message = session.query(TicketMessage).filter(
+                    TicketMessage.ticket_id == ticket_id,
+                    TicketMessage.is_admin == True
+                ).order_by(TicketMessage.created_at.desc()).first()
+
+                if last_admin_message:
+                    learning_service.learn_from_ticket(ticket.description, last_admin_message.message)
+            except Exception as learn_e:
+                logger.warning(f"Failed to learn from ticket {ticket_id}: {learn_e}")
+
             await query.edit_message_text(f"✅ Ticket #{ticket_id} chiuso con successo!")
         else:
             await query.edit_message_text("❌ Ticket non trovato.")
