@@ -43,7 +43,7 @@ services:
         value: "2"
       # Abilita webhook per efficienza massima (no polling)
       - key: USE_WEBHOOK
-        value: "true"
+        value: "false"
       # SQLite autonomo - nessuna configurazione SSL necessaria
       - key: AUTONOMOUS_MODE
         value: "true"
