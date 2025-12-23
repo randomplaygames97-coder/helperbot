@@ -614,7 +614,7 @@ def run_bot():
     try:
         logger.info("Starting ErixCastBot...")
         # Import bot modules directly
-        from bot import main as bot_main
+        from .bot import main as bot_main
         bot_main()
     except Exception as e:
         logger.error(f"Bot failed to start: {e}")
