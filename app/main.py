@@ -204,7 +204,7 @@ def initialize_database():
 database_available = initialize_database()
 
 # Import models directly (with --chdir, the root directory is in Python path)
-from models import UptimePing, create_tables
+from .models import UptimePing, create_tables
 import models
 if SessionLocal:
     models.SessionLocal = SessionLocal
@@ -661,7 +661,7 @@ if __name__ != '__main__':
     # Start enhanced auto-ping system to prevent Render sleep
     if app is not None:
         # Import models for database tracking
-        from models import UptimePing
+        from .models import UptimePing
 
         class PingCircuitBreaker:
             """Circuit breaker for ping threads to handle failures gracefully"""
