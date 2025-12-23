@@ -322,10 +322,10 @@ async def graceful_shutdown():
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 ADMIN_IDS = [int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()]
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+WEBHOOK_URL = f"https://helperbot-c152.onrender.com/webhook/{TELEGRAM_BOT_TOKEN.split(':')[0]}"
 
-# Configurazione metodo ricezione aggiornamenti - FORCE POLLING for stability
-USE_WEBHOOK = False  # Force polling mode to ensure bot responds to commands
+# Configurazione metodo ricezione aggiornamenti - USE WEBHOOK for Render deployment
+USE_WEBHOOK = True  # Use webhook mode for production deployment
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -4728,22 +4728,40 @@ async def run_bot_main_loop():
 
     # Start bot - FINAL WORKING VERSION
     try:
-        logger.info("🔄 Starting bot polling...")
-        
-        # Clear any existing webhook
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ Webhook cleared")
-        
-        # Start polling - SIMPLE AND WORKING
-        logger.info("✅ Bot is now listening for messages...")
-        
-        await application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-            stop_signals=None
-        )
-        
-        logger.info("✅ Bot polling completed")
+        if USE_WEBHOOK and WEBHOOK_URL:
+            logger.info("🔄 Setting up webhook mode...")
+
+            # Set webhook for production
+            await application.bot.set_webhook(WEBHOOK_URL)
+            logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+
+            # In webhook mode, the bot doesn't poll - webhooks are handled by Flask
+            logger.info("✅ Bot is now configured for webhook mode")
+
+            # Keep the application alive for webhook processing
+            # The Flask app will handle incoming webhooks
+            import asyncio
+            while True:
+                await asyncio.sleep(60)  # Keep alive
+                logger.info("🔄 Webhook mode active - waiting for updates...")
+
+        else:
+            logger.info("🔄 Starting bot polling...")
+
+            # Clear any existing webhook
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("✅ Webhook cleared")
+
+            # Start polling - SIMPLE AND WORKING
+            logger.info("✅ Bot is now listening for messages...")
+
+            await application.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+                stop_signals=None
+            )
+
+            logger.info("✅ Bot polling completed")
         
     except Exception as e:
         logger.error(f"❌ Bot polling error: {e}")
