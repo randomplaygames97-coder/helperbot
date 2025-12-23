@@ -9,4 +9,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Render Service
-        run: curl -f https://erixcastbot.onrender.com/ping
+        run: curl -f https://helperbot-c152.onrender.com/ping
