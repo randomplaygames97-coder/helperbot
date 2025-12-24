@@ -3470,6 +3470,67 @@ async def admin_reply_ticket_callback(update: Update, context: ContextTypes.DEFA
     context.user_data['admin_reply_ticket'] = ticket_id
     await query.edit_message_text("💬 Scrivi la tua risposta al ticket:")
 
+async def admin_view_ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Visualizza dettagli completi di un ticket per admin"""
+    query = update.callback_query
+    await query.answer()
+    ticket_id = int(query.data.split(':')[1])
+    user_id = query.from_user.id
+
+    if not is_admin(user_id):
+        await query.edit_message_text("❌ Accesso negato!")
+        return
+
+    session = get_database_session()
+    if not session:
+        await query.edit_message_text("⚠️ Database temporaneamente non disponibile.")
+        return
+
+    try:
+        # Ottieni ticket con messaggi
+        ticket = session.query(Ticket).filter(Ticket.id == ticket_id).first()
+        if not ticket:
+            await query.edit_message_text("❌ Ticket non trovato.")
+            return
+
+        messages = session.query(TicketMessage).filter(
+            TicketMessage.ticket_id == ticket_id
+        ).order_by(TicketMessage.created_at).all()
+
+        # Costruisci messaggio dettagliato
+        status_emoji = {"open": "🟢", "escalated": "🟡", "closed": "🔴", "resolved": "✅"}
+        
+        ticket_details = f"""🎫 **Ticket #{ticket.id}** {status_emoji.get(ticket.status, '⚪')}
+
+👤 **Utente:** {ticket.user_id}
+📝 **Titolo:** {ticket.title}
+📄 **Descrizione:** {ticket.description}
+📊 **Status:** {ticket.status}
+🤖 **Tentativi AI:** {ticket.ai_attempts}
+📅 **Creato:** {ticket.created_at.strftime('%d/%m/%Y %H:%M')}
+
+💬 **Conversazione:**"""
+
+        for msg in messages[-5:]:  # Ultimi 5 messaggi
+            sender = "🤖 AI" if msg.is_ai else ("👨‍💼 Admin" if msg.is_admin else "👤 User")
+            ticket_details += f"\n\n{sender}: {msg.message[:200]}{'...' if len(msg.message) > 200 else ''}"
+
+        # Pulsanti azione
+        keyboard = [
+            [InlineKeyboardButton("💬 Rispondi", callback_data=f'admin_reply_ticket:{ticket_id}')],
+            [InlineKeyboardButton("✅ Chiudi Ticket", callback_data=f'admin_close_ticket:{ticket_id}')],
+            [InlineKeyboardButton("⬅️ Torna ai Ticket", callback_data='admin_tickets')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(ticket_details, reply_markup=reply_markup)
+
+    except Exception as e:
+        logger.error(f"Error in admin_view_ticket_callback: {e}")
+        await query.edit_message_text("❌ Errore nel visualizzare il ticket.")
+    finally:
+        session.close()
+
 async def admin_close_ticket_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()

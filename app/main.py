@@ -610,15 +610,30 @@ if app:
 
 # Import and run bot in a separate thread
 def run_bot():
-    """Run the bot in a separate thread"""
+    """Run the bot in a separate thread with proper event loop"""
     try:
         logger.info("Starting ErixCastBot...")
+        
+        # Crea un nuovo event loop per questo thread
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         # Import bot modules directly
         from .bot import main as bot_main
-        bot_main()
+        
+        # Esegui il bot nel loop
+        loop.run_until_complete(bot_main())
+        
     except Exception as e:
         logger.error(f"Bot failed to start: {e}")
         raise
+    finally:
+        # Chiudi il loop quando il bot termina
+        try:
+            loop.close()
+        except:
+            pass
 
 # For production deployment (Gunicorn) - start bot when imported
 if __name__ != '__main__':
