@@ -26,8 +26,8 @@ class BotWatchdog:
     """Watchdog per monitorare e riavviare il bot se necessario"""
     
     def __init__(self):
-        self.check_interval = 60  # Controllo ogni minuto
-        self.max_failures = 3  # Max fallimenti consecutivi prima del restart
+        self.check_interval = 300  # Controllo ogni 5 minuti
+        self.max_failures = 5  # Max fallimenti consecutivi prima del restart
         self.consecutive_failures = 0
         self.last_success = None
         self.restart_count = 0
