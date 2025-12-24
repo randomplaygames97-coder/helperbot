@@ -524,11 +524,14 @@ if app:
     @app.route('/ping')
     def ping():
         """Lightweight ping endpoint to prevent Render sleep"""
+        logger.info("🏓 Ping endpoint called")
         from datetime import datetime, timezone
-        return jsonify({
+        response = jsonify({
             'status': 'pong',
             'timestamp': datetime.now(timezone.utc).isoformat()
-        }), 200
+        })
+        logger.info("🏓 Ping endpoint returning pong")
+        return response, 200
 
     @app.route('/status')
     def status():
