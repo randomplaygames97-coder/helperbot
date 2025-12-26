@@ -369,15 +369,142 @@ application = None
 def initialize_application():
     """Initialize the Telegram application at module level"""
     global application
-    if application is None and TELEGRAM_BOT_TOKEN:
+    logger.info(f"🔍 DEBUG: initialize_application called - current application: {application}")
+    logger.info(f"🔍 DEBUG: TELEGRAM_BOT_TOKEN available: {bool(TELEGRAM_BOT_TOKEN)}")
+    logger.info(f"🔍 DEBUG: TELEGRAM_BOT_TOKEN length: {len(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else 0}")
+
+    if application is not None:
+        logger.info("🔄 DEBUG: Application already initialized, returning existing instance")
+        logger.info(f"🔄 DEBUG: Existing application has handlers: {hasattr(application, 'handlers') and application.handlers}")
+        return application
+
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("❌ DEBUG: No TELEGRAM_BOT_TOKEN available for initialization")
+        return None
+
+    try:
+        logger.info("🔧 Initializing Telegram application at module level...")
+        logger.info(f"🔧 Using token: {TELEGRAM_BOT_TOKEN[:10]}...")
+
+        # Create application
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        logger.info("✅ Telegram application created successfully")
+        logger.info(f"✅ Application object: {application}")
+        logger.info(f"✅ Application bot: {application.bot if application else 'None'}")
+
+        # Test bot connection synchronously
         try:
-            logger.info("🔧 Initializing Telegram application at module level...")
-            application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-            logger.info("✅ Telegram application initialized successfully")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Telegram application: {e}")
+            import asyncio
+            # Create a new event loop for this synchronous call
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            bot_info = loop.run_until_complete(application.bot.get_me())
+            loop.close()
+            logger.info(f"✅ Bot connection test successful: @{bot_info.username}")
+        except Exception as bot_e:
+            logger.error(f"❌ Bot connection test failed: {bot_e}")
             application = None
-    return application
+            return None
+
+        # Register handlers immediately after initialization
+        logger.info("🔧 Registering handlers after application initialization...")
+        handlers_registered = 0
+
+        try:
+            # Register ALL handlers here to ensure they're available
+            # Command handlers
+            start_handler = CommandHandler("start", start)
+            application.add_handler(start_handler)
+            handlers_registered += 1
+            logger.info("✅ /start command handler registered")
+
+            help_handler = CommandHandler("help", help_command)
+            application.add_handler(help_handler)
+            handlers_registered += 1
+            logger.info("✅ /help command handler registered")
+
+            # Message handlers
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            handlers_registered += 1
+            logger.info("✅ Message handler registered")
+
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_contact_message), group=1)
+            handlers_registered += 1
+            logger.info("✅ Admin contact message handler registered")
+
+            # Callback handlers - ALL OF THEM
+            callback_patterns = [
+                ('^renew_list:', renew_list_callback),
+                ('^renew_months:', renew_months_callback),
+                ('^confirm_renew:', confirm_renew_callback),
+                ('^delete_list:', delete_list_callback),
+                ('^confirm_delete:', confirm_delete_callback),
+                ('^notify_list:', notify_list_callback),
+                ('^notify_days:', notify_days_callback),
+                ('^view_ticket:', view_ticket_callback),
+                ('^reply_ticket:', reply_ticket_callback),
+                ('^close_ticket:', close_ticket_callback),
+                ('^continue_ticket:', continue_ticket_callback),
+                ('^close_ticket_user:', close_ticket_user_callback),
+                ('^escalate_ticket:', escalate_ticket_callback),
+                ('^contact_admin:', contact_admin_callback),
+                ('^select_list:', select_list_callback),
+                ('^edit_list:', edit_list_callback),
+                ('^edit_field:', edit_field_callback),
+                ('^delete_admin_list:', delete_admin_list_callback),
+                ('^confirm_admin_delete:', confirm_admin_delete_callback),
+                ('^select_ticket:', select_ticket_callback),
+                ('^admin_reply_ticket:', admin_reply_ticket_callback),
+                ('^admin_view_ticket:', admin_view_ticket_callback),
+                ('^admin_close_ticket:', admin_close_ticket_callback),
+                ('^manage_renewal:', manage_renewal_callback),
+                ('^approve_renewal:', approve_renewal_callback),
+                ('^reject_renewal:', reject_renewal_callback),
+                ('^contest_renewal:', contest_renewal_callback),
+                ('^manage_deletion:', manage_deletion_callback),
+                ('^approve_deletion:', approve_deletion_callback),
+                ('^reject_deletion:', reject_deletion_callback),
+                ('^export_tickets', export_tickets_callback),
+                ('^export_notifications', export_notifications_callback),
+                ('^export_all', export_all_callback),
+            ]
+
+            for pattern, callback in callback_patterns:
+                try:
+                    application.add_handler(CallbackQueryHandler(callback, pattern=pattern))
+                    handlers_registered += 1
+                except Exception as cb_e:
+                    logger.warning(f"⚠️ Failed to register callback handler for pattern {pattern}: {cb_e}")
+
+            # General button handler (MUST BE LAST)
+            application.add_handler(CallbackQueryHandler(button_handler))
+            handlers_registered += 1
+            logger.info("✅ General button handler registered")
+
+            logger.info(f"✅ Handler registration completed: {handlers_registered} handlers registered")
+            logger.info(f"✅ Total handlers in application: {len(application.handlers) if hasattr(application, 'handlers') else 'unknown'}")
+
+            if handlers_registered < 5:  # At least basic handlers should be registered
+                logger.error(f"❌ Too few handlers registered ({handlers_registered}), initialization failed")
+                application = None
+                return None
+
+        except Exception as handler_e:
+            logger.error(f"❌ Failed to register handlers: {handler_e}")
+            import traceback
+            logger.error(f"❌ Handler registration traceback: {traceback.format_exc()}")
+            application = None
+            return None
+
+        logger.info("✅ Telegram application fully initialized and ready")
+        return application
+
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Telegram application: {e}")
+        import traceback
+        logger.error(f"❌ Full initialization traceback: {traceback.format_exc()}")
+        application = None
+        return None
 
 # Try to initialize application early if token is available
 if TELEGRAM_BOT_TOKEN:
@@ -995,7 +1122,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_lang = get_user_language(user_id)
 
-    logger.info(f"👋 START COMMAND: User {user_id} started the bot")
+    logger.info(f"👋 START COMMAND RECEIVED: User {user_id} started the bot")
     logger.info(f"📨 Update details: {update}")
     logger.info(f"🔍 Update type: {type(update)}")
     logger.info(f"🔍 Update message: {update.message}")
@@ -1003,6 +1130,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"🔍 Message text: '{update.message.text}'")
         logger.info(f"🔍 Message chat: {update.message.chat}")
         logger.info(f"🔍 Message from: {update.message.from_user}")
+    logger.info(f"🔍 Context: {context}")
+    logger.info(f"🔍 Context user_data: {context.user_data}")
+    logger.info(f"🔍 Application state: {application}")
+    logger.info(f"🔍 DEBUG: Start command handler is executing")
+    logger.info(f"🔍 DEBUG: User ID: {user_id}")
+    logger.info(f"🔍 DEBUG: User language: {user_lang}")
+    logger.info(f"🔍 DEBUG: Is admin: {is_admin(user_id)}")
+    logger.info(f"🔍 DEBUG: Handler registration check: start handler is active")
+    logger.info(f"🔍 DEBUG: Application handlers: {len(application.handlers) if application and hasattr(application, 'handlers') else 'No handlers'}")
 
     # Check rate limit
     if not check_rate_limit(user_id, 'send_message'):
@@ -1015,6 +1151,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Log accesso utente
     log_user_action(user_id, "start_command")
     logger.info(f"✅ Start command processing for user {user_id}")
+    logger.info(f"🔍 Handler registration check: start handler is active")
 
     # Messaggio di benvenuto migliorato con statistiche
     session = SessionLocal()
@@ -1409,7 +1546,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = update.message.text
     action = context.user_data.get('action')
 
-    logger.info(f"📨 Message received from user {user_id}: '{message_text}' (action: {action})")
+    logger.info(f"📨 MESSAGE RECEIVED from user {user_id}: '{message_text}' (action: {action})")
+    logger.info(f"🔍 Message handler is active and processing message")
+    logger.info(f"🔍 Update object: {update}")
+    logger.info(f"🔍 Context: {context}")
+    logger.info(f"🔍 Context user_data keys: {list(context.user_data.keys()) if context.user_data else 'None'}")
+    logger.info(f"🔍 Message object: {update.message}")
+    logger.info(f"🔍 Message chat: {update.message.chat if update.message else 'None'}")
+    logger.info(f"🔍 Message from_user: {update.message.from_user if update.message else 'None'}")
+    logger.info(f"🔍 DEBUG: handle_message function called")
+    logger.info(f"🔍 DEBUG: User ID: {user_id}")
+    logger.info(f"🔍 DEBUG: Message text: '{message_text}'")
+    logger.info(f"🔍 DEBUG: Action: {action}")
+    logger.info(f"🔍 DEBUG: Is admin: {is_admin(user_id)}")
+    logger.info(f"🔍 DEBUG: User language: {get_user_language(user_id)}")
+    logger.info(f"🔍 DEBUG: Application handlers count: {len(application.handlers) if application and hasattr(application, 'handlers') else 'No application'}")
 
     # Check if admin is in contact mode
     if is_admin(user_id) and context.user_data.get('contact_user_ticket'):
@@ -4762,6 +4913,7 @@ async def run_bot_main_loop():
 
     # Use the application initialized at module level
     global application
+    logger.info(f"🔍 Application at start of main loop: {application}")
     if application is None:
         logger.error("❌ Application not initialized - cannot start bot")
         raise RuntimeError("Telegram application not initialized")
@@ -4769,11 +4921,13 @@ async def run_bot_main_loop():
     # Add simple error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Bot error: {context.error}")
-    
+
     application.add_error_handler(error_handler)
+    logger.info("✅ Error handler added to application")
 
     # Register ALL handlers
     logger.info("📝 Registering all handlers...")
+    logger.info(f"🔍 Application before handler registration: {application}")
 
     # Command handlers - only register existing functions
     logger.info("📝 Registering command handlers...")
@@ -4784,6 +4938,48 @@ async def run_bot_main_loop():
     help_handler = CommandHandler("help", help_command)
     application.add_handler(help_handler)
     logger.info("✅ /help command handler registered")
+
+    logger.info("📝 Command handlers registration completed")
+    logger.info(f"🔍 Application after command handlers: {application}")
+    logger.info(f"🔍 Application handlers count: {len(application.handlers) if hasattr(application, 'handlers') else 'unknown'}")
+
+    # Log all registered handlers for debugging
+    if hasattr(application, 'handlers') and application.handlers:
+        logger.info("📋 SUMMARY OF REGISTERED HANDLERS:")
+        for i, handler_group in enumerate(application.handlers):
+            if isinstance(handler_group, list):
+                logger.info(f"  Group {i}: {len(handler_group)} handlers")
+                for j, handler in enumerate(handler_group):
+                    handler_type = type(handler).__name__
+                    if hasattr(handler, 'command') and handler.command:
+                        logger.info(f"    {j}. {handler_type} - commands: {handler.command}")
+                    elif hasattr(handler, 'pattern') and handler.pattern:
+                        logger.info(f"    {j}. {handler_type} - pattern: {handler.pattern}")
+                    else:
+                        logger.info(f"    {j}. {handler_type}")
+            else:
+                logger.info(f"  Group {i}: {type(handler_group).__name__}")
+    else:
+        logger.warning("⚠️ No handlers found after registration!")
+
+    # Log all registered handlers for debugging
+    if hasattr(application, 'handlers') and application.handlers:
+        logger.info("📋 SUMMARY OF REGISTERED HANDLERS:")
+        for i, handler_group in enumerate(application.handlers):
+            if isinstance(handler_group, list):
+                logger.info(f"  Group {i}: {len(handler_group)} handlers")
+                for j, handler in enumerate(handler_group):
+                    handler_type = type(handler).__name__
+                    if hasattr(handler, 'command') and handler.command:
+                        logger.info(f"    {j}. {handler_type} - commands: {handler.command}")
+                    elif hasattr(handler, 'pattern') and handler.pattern:
+                        logger.info(f"    {j}. {handler_type} - pattern: {handler.pattern}")
+                    else:
+                        logger.info(f"    {j}. {handler_type}")
+            else:
+                logger.info(f"  Group {i}: {type(handler_group).__name__}")
+    else:
+        logger.warning("⚠️ No handlers found after registration!")
 
     # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -4859,7 +5055,7 @@ async def run_bot_main_loop():
 
         else:
             logger.info("🔄 Starting bot polling mode...")
-            logger.info(f"🤖 Bot Token: {TELEGRAM_BOT_TOKEN[:10]}...")
+            logger.info(f"🤖 Bot Token: {TELEGRAM_BOT_TOKEN[:10] if TELEGRAM_BOT_TOKEN else 'None'}...")
             logger.info("📡 No webhook URL configured - using polling")
 
             # Clear any existing webhook

@@ -485,7 +485,8 @@ def test_database_connection():
             from sqlalchemy import text
             # Use SQLite compatible query instead of PostgreSQL version()
             result = session.execute(text("SELECT 1 as test"))
-            test_result = result.fetchone()[0]
+            row = result.fetchone()
+            test_result = row[0] if row else None
             session.close()
             if test_result == 1:
                 logger.info("Database connection successful - SQLite database operational")
@@ -580,10 +581,14 @@ if app:
 
             # Test bot connectivity (quick test)
             try:
-                # Simple bot status check without circular imports
-                bot_status = "bot_initializing"  # Default status
-            except Exception:
-                bot_status = "bot_check_failed"
+                # Check bot thread status
+                if bot_thread and bot_thread.is_alive():
+                    bot_status_value = bot_status
+                else:
+                    bot_status_value = "bot_thread_dead"
+            except Exception as bot_e:
+                logger.warning(f"Bot status check failed: {bot_e}")
+                bot_status_value = "bot_check_failed"
 
             # Get resource status
             resource_status = {}
@@ -659,7 +664,7 @@ if app:
                     'latest_backup': db_stats.get('latest_backup', 'none'),
                     'path': DATABASE_PATH if database_available else 'unavailable'
                 },
-                'bot_status': bot_status,
+                'bot_status': bot_status_value,
                 'uptime_seconds': uptime_seconds,
                 'resources': resource_status,
                 'performance': {
@@ -730,41 +735,130 @@ if app:
     def telegram_webhook():
         """Telegram webhook endpoint - more efficient than polling"""
         try:
-            logger.info("📨 Webhook received - processing update")
+            logger.info("📨 WEBHOOK RECEIVED - STARTING PROCESSING")
             # Import here to avoid circular imports
             import asyncio
             from telegram import Update
 
             # Get application from bot module and ensure it's initialized
             from . import bot
-            if hasattr(bot, 'initialize_application'):
-                bot.initialize_application()
+            logger.info(f"🔍 Bot module imported, has application attr: {hasattr(bot, 'application')}")
+            logger.info(f"🔍 Bot application current state: {bot.application}")
+            logger.info(f"🔍 Bot status: {bot_status}")
+            logger.info(f"🔍 Bot thread alive: {bot_thread and bot_thread.is_alive() if 'bot_thread' in globals() else False}")
+            logger.info(f"🔍 Global bot_status: {globals().get('bot_status', 'not_set')}")
+            logger.info(f"🔍 Bot application type: {type(bot.application) if bot.application else 'None'}")
+            logger.info(f"🔍 Bot application bot: {bot.application.bot if bot.application and hasattr(bot.application, 'bot') else 'No bot attr'}")
+            logger.info(f"🔍 Bot application handlers: {len(bot.application.handlers) if bot.application and hasattr(bot.application, 'handlers') else 'No handlers attr'}")
+            logger.info("🔍 DEBUG: Checking if application is properly initialized...")
+            logger.info(f"🔍 DEBUG: hasattr(bot, 'application'): {hasattr(bot, 'application')}")
+            if hasattr(bot, 'application'):
+                logger.info(f"🔍 DEBUG: bot.application is not None: {bot.application is not None}")
+                if bot.application:
+                    logger.info(f"🔍 DEBUG: hasattr(bot.application, 'handlers'): {hasattr(bot.application, 'handlers')}")
+                    if hasattr(bot.application, 'handlers'):
+                        logger.info(f"🔍 DEBUG: len(bot.application.handlers): {len(bot.application.handlers)}")
+                        logger.info(f"🔍 DEBUG: bot.application.handlers type: {type(bot.application.handlers)}")
+            logger.info("🔍 DEBUG: Application check completed")
 
-            if hasattr(bot, 'application') and bot.application:
+            # Check if bot thread is running
+            bot_thread_alive = bot_thread and bot_thread.is_alive() if 'bot_thread' in globals() else False
+            logger.info(f"🔍 Bot thread alive: {bot_thread_alive}")
+
+            # Check if application is ready
+            app_ready = (hasattr(bot, 'application') and bot.application is not None and
+                        hasattr(bot.application, 'handlers') and bot.application.handlers)
+            logger.info(f"🔍 Application ready: {app_ready}")
+
+            if not app_ready:
+                logger.warning("⚠️ Bot application not ready, attempting recovery...")
+
+                # Try to initialize application
+                if hasattr(bot, 'initialize_application'):
+                    logger.info("🔄 Attempting to initialize application in webhook handler...")
+                    init_result = bot.initialize_application()
+                    logger.info(f"🔄 Initialization result: {init_result}")
+
+                    if init_result and hasattr(bot, 'application') and bot.application:
+                        logger.info("✅ Application initialized successfully in webhook handler")
+                        app_ready = True
+                    else:
+                        logger.error("❌ Application initialization failed in webhook handler")
+                        return jsonify({'status': 'error', 'message': 'Bot application not ready'}), 503
+
+            if app_ready:
+                logger.info("✅ Bot application is available for processing")
+
                 # Process webhook update
-                update_data = request.get_json()
-                logger.info(f"📄 Update data received: {update_data is not None}")
-                if update_data:
+                try:
+                    update_data = request.get_json()
+                    logger.info(f"📄 Update data received: {update_data is not None}")
+
+                    if not update_data:
+                        logger.warning("⚠️ No update data in webhook request")
+                        return jsonify({'status': 'error', 'message': 'No update data'}), 400
+
                     message_text = update_data.get('message', {}).get('text', 'N/A')
                     logger.info(f"📝 Update type: {message_text[:50]}...")
                     logger.info(f"🔍 Full update data keys: {list(update_data.keys())}")
-                    if 'message' in update_data:
-                        logger.info(f"💬 Message details: chat_id={update_data['message'].get('chat', {}).get('id')}, text='{message_text}'")
+
+                    # Check if this is a command
+                    if 'message' in update_data and 'text' in update_data['message']:
+                        text = update_data['message']['text']
+                        if text.startswith('/'):
+                            logger.info(f"🎯 COMMAND DETECTED: {text}")
+                        else:
+                            logger.info(f"💬 REGULAR MESSAGE: {text[:50]}...")
+
                     # Convert to Update object and process
-                    update = Update.de_json(update_data, bot.application.bot)
-                    if update:
+                    try:
+                        update = Update.de_json(update_data, bot.application.bot)
+                        if not update:
+                            logger.warning("⚠️ Failed to create Update object from data")
+                            return jsonify({'status': 'error', 'message': 'Invalid update format'}), 400
+
                         logger.info("✅ Update object created successfully")
+                        logger.info(f"📝 Update type: {type(update).__name__}")
+                        logger.info(f"📝 Update has message: {hasattr(update, 'message') and update.message is not None}")
+                        if hasattr(update, 'message') and update.message:
+                            logger.info(f"📝 Message text: '{update.message.text}'")
+                            logger.info(f"📝 Message chat ID: {update.message.chat.id}")
+                            logger.info(f"📝 Message from user: {update.message.from_user.id if update.message.from_user else 'None'}")
+                        logger.info(f"📝 Update has callback_query: {hasattr(update, 'callback_query') and update.callback_query is not None}")
+                        if hasattr(update, 'callback_query') and update.callback_query:
+                            logger.info(f"📝 Callback data: '{update.callback_query.data}'")
+
                         # Process in background to avoid timeout
                         import threading
                         def process_update():
                             try:
                                 logger.info("🔄 Processing update in background thread")
-                                # Create new event loop for this thread
-                                loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(loop)
-                                loop.run_until_complete(bot.application.process_update(update))
-                                loop.close()
-                                logger.info("✅ Update processed successfully")
+                                logger.info(f"🔄 Bot application handlers: {len(bot.application.handlers) if hasattr(bot.application, 'handlers') else 'No handlers'}")
+
+                                # Check if there's already an event loop
+                                try:
+                                    loop = asyncio.get_event_loop()
+                                    if loop.is_running():
+                                        logger.info("🔄 Event loop already running, using it")
+                                        loop.create_task(bot.application.process_update(update))
+                                        logger.info("✅ Update queued to running event loop")
+                                    else:
+                                        logger.info("🔄 Event loop not running, creating new one")
+                                        # Create new event loop for this thread
+                                        loop = asyncio.new_event_loop()
+                                        asyncio.set_event_loop(loop)
+                                        loop.run_until_complete(bot.application.process_update(update))
+                                        loop.close()
+                                        logger.info("✅ Update processed in new event loop")
+                                except RuntimeError:
+                                    logger.info("🔄 No event loop, creating new one")
+                                    # Create new event loop for this thread
+                                    loop = asyncio.new_event_loop()
+                                    asyncio.set_event_loop(loop)
+                                    loop.run_until_complete(bot.application.process_update(update))
+                                    loop.close()
+                                    logger.info("✅ Update processed in fallback event loop")
+                                logger.info("✅ Update processing completed")
                             except Exception as e:
                                 logger.error(f"❌ Error processing webhook update: {e}")
                                 import traceback
@@ -772,23 +866,20 @@ if app:
 
                         thread = threading.Thread(target=process_update, daemon=True)
                         thread.start()
+                        logger.info("✅ Background processing thread started")
 
                         return jsonify({'status': 'ok'}), 200
-                    else:
-                        logger.warning("⚠️ Failed to create Update object from data")
-                        logger.warning(f"⚠️ Update data: {update_data}")
+
+                    except Exception as update_e:
+                        logger.error(f"❌ Error creating/parsing update: {update_e}")
+                        return jsonify({'status': 'error', 'message': 'Update processing failed'}), 500
+
+                except Exception as json_e:
+                    logger.error(f"❌ Error parsing webhook JSON: {json_e}")
+                    return jsonify({'status': 'error', 'message': 'Invalid JSON'}), 400
             else:
-                logger.warning("⚠️ Bot application not available")
-                logger.warning(f"⚠️ Bot module has application: {hasattr(bot, 'application')}")
-                if hasattr(bot, 'application'):
-                    logger.warning(f"⚠️ Application is None: {bot.application is None}")
-                # Try to initialize if possible
-                if hasattr(bot, 'initialize_application'):
-                    logger.info("🔄 Attempting to initialize application...")
-                    bot.initialize_application()
-                    if bot.application:
-                        logger.info("✅ Application initialized successfully in webhook handler")
-                        return jsonify({'status': 'retry', 'message': 'Application initialized, please retry request'}), 200
+                logger.error("❌ Bot application not available after recovery attempts")
+                return jsonify({'status': 'error', 'message': 'Bot not ready'}), 503
 
             return jsonify({'status': 'error', 'message': 'Bot not ready or invalid update'}), 400
         except Exception as e:
@@ -806,42 +897,93 @@ if app:
             'version': '2.0.0'
         })
 
+# Global bot status tracking
+bot_status = "stopped"
+bot_thread = None
+
 # Import and run bot in a separate thread
 def run_bot():
     """Run the bot in a separate thread with proper event loop"""
+    global bot_status
     try:
-        logger.info("Starting ErixCastBot...")
-        
+        logger.info("🚀 Starting ErixCastBot...")
+        logger.info("🔍 DEBUG: run_bot function called")
+        bot_status = "starting"
+        logger.info("🔍 DEBUG: bot_status set to 'starting'")
+
         # Crea un nuovo event loop per questo thread
         import asyncio
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+        logger.info("🔍 DEBUG: new event loop created")
+
         # Import bot modules directly
+        logger.info("🔍 DEBUG: importing bot module...")
         from . import bot
+        logger.info("🔍 DEBUG: bot module imported successfully")
+        logger.info(f"🔍 DEBUG: bot has application attr: {hasattr(bot, 'application')}")
+        logger.info(f"🔍 DEBUG: bot application: {bot.application}")
+
+        bot_status = "running"
+        logger.info("✅ ErixCastBot status: running")
 
         # Esegui il bot nel loop
+        logger.info("🔍 DEBUG: calling bot.run_bot_main_loop()...")
         loop.run_until_complete(bot.run_bot_main_loop())
-        
+        logger.info("✅ Bot main loop completed")
+
     except Exception as e:
-        logger.error(f"Bot failed to start: {e}")
+        logger.error(f"❌ Bot failed to start: {e}")
+        logger.error(f"🔍 DEBUG: Exception type: {type(e)}")
+        import traceback
+        logger.error(f"🔍 DEBUG: Full traceback: {traceback.format_exc()}")
+        bot_status = "failed"
         raise
     finally:
+        bot_status = "stopped"
+        logger.info("🔍 DEBUG: bot_status set to 'stopped'")
         # Chiudi il loop quando il bot termina
         try:
             loop.close()
-        except:
-            pass
+            logger.info("🔍 DEBUG: event loop closed")
+        except Exception as close_e:
+            logger.error(f"Error closing event loop: {close_e}")
 
 # For production deployment (Gunicorn) - start bot when imported
 if __name__ != '__main__':
     # This block runs when imported by Gunicorn
     import threading
-    
-    # Avvia il bot in un thread separato
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    logger.info("ErixCastBot started successfully in production mode")
+
+    # Initialize bot application synchronously before starting Flask
+    logger.info("🔄 Initializing bot application synchronously...")
+    bot_app_initialized = False
+    try:
+        from . import bot
+        if hasattr(bot, 'initialize_application'):
+            result = bot.initialize_application()
+            logger.info(f"✅ Bot application initialization returned: {result}")
+            if hasattr(bot, 'application') and bot.application:
+                logger.info("✅ Bot application is ready for webhooks")
+                bot_app_initialized = True
+            else:
+                logger.warning("⚠️ Bot application initialized but is None")
+        else:
+            logger.error("❌ Bot module does not have initialize_application function")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize bot application synchronously: {e}")
+        import traceback
+        logger.error(f"❌ Full initialization traceback: {traceback.format_exc()}")
+
+    # Only start bot thread if initialization was successful
+    if bot_app_initialized:
+        # Avvia il bot in un thread separato
+        bot_thread = threading.Thread(target=run_bot, daemon=True, name="ErixCastBot")
+        bot_thread.start()
+        logger.info("✅ ErixCastBot thread started successfully in production mode")
+    else:
+        logger.error("❌ Bot application not initialized - webhook processing will not work")
+        logger.error("❌ Bot thread NOT started due to initialization failure")
+        bot_status = "initialization_failed"
     
     # Avvia il watchdog per monitorare la stabilità del bot (solo se non in sviluppo)
     if os.getenv('RENDER') == 'true':
