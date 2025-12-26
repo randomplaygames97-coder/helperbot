@@ -731,11 +731,20 @@ if app:
             }), 500
 
     # Webhook endpoint for Telegram (more efficient than polling)
-    @app.route(f'/webhook/{TELEGRAM_BOT_TOKEN.split(":")[0]}', methods=['POST'])
+    @app.route(f'/webhook/{TELEGRAM_BOT_TOKEN.split(":")[0]}', methods=['GET', 'POST'])
     def telegram_webhook():
         """Telegram webhook endpoint - more efficient than polling"""
         try:
-            logger.info("📨 WEBHOOK RECEIVED - STARTING PROCESSING")
+            if request.method == 'GET':
+                logger.info("🔍 WEBHOOK TEST GET REQUEST - Webhook endpoint is accessible")
+                return jsonify({
+                    'status': 'webhook_endpoint_active',
+                    'method': 'GET',
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'message': 'Webhook endpoint is responding correctly'
+                }), 200
+
+            logger.info("� WEBHOOK RECEIVED - STARTING PROCESSING")
             # Import here to avoid circular imports
             import asyncio
             from telegram import Update

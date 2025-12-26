@@ -322,7 +322,9 @@ async def graceful_shutdown():
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 ADMIN_IDS = [int(id.strip()) for id in os.getenv('ADMIN_IDS', '').split(',') if id.strip()]
-WEBHOOK_URL = f"https://helperbot-c152.onrender.com/webhook/{TELEGRAM_BOT_TOKEN.split(':')[0]}" if TELEGRAM_BOT_TOKEN else None
+# Use RENDER_EXTERNAL_URL for dynamic webhook URL instead of hardcoded domain
+render_external_url = os.getenv('RENDER_EXTERNAL_URL')
+WEBHOOK_URL = f"{render_external_url}/webhook/{TELEGRAM_BOT_TOKEN.split(':')[0]}" if render_external_url and TELEGRAM_BOT_TOKEN else None
 
 # Configurazione metodo ricezione aggiornamenti - USE WEBHOOK for Render deployment
 USE_WEBHOOK = os.getenv('RENDER') == 'true'  # Use webhook mode only on Render
@@ -5030,18 +5032,32 @@ async def run_bot_main_loop():
         if USE_WEBHOOK and WEBHOOK_URL:
             logger.info("🔄 Setting up webhook mode...")
             logger.info(f"📡 Webhook URL: {WEBHOOK_URL}")
+            logger.info(f"🌐 RENDER_EXTERNAL_URL: {render_external_url}")
             logger.info(f"🤖 Bot Token: {TELEGRAM_BOT_TOKEN[:10] if TELEGRAM_BOT_TOKEN else 'None'}...")
             logger.info(f"🔧 USE_WEBHOOK: {USE_WEBHOOK}")
             logger.info(f"🔧 WEBHOOK_URL exists: {WEBHOOK_URL is not None}")
+            logger.info(f"🔧 RENDER_EXTERNAL_URL exists: {render_external_url is not None}")
 
             # Set webhook for production
             logger.info("🔄 Setting webhook on Telegram servers...")
-            await application.bot.set_webhook(WEBHOOK_URL)
-            logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+            try:
+                await application.bot.set_webhook(WEBHOOK_URL)
+                logger.info(f"✅ Webhook set successfully to {WEBHOOK_URL}")
+            except Exception as webhook_error:
+                logger.error(f"❌ Failed to set webhook: {webhook_error}")
+                raise
 
             # Verify webhook was set
-            webhook_info = await application.bot.get_webhook_info()
-            logger.info(f"🔍 Webhook info: URL={webhook_info.url}, pending_updates={webhook_info.pending_update_count}")
+            try:
+                webhook_info = await application.bot.get_webhook_info()
+                logger.info(f"🔍 Webhook verification: URL={webhook_info.url}, pending_updates={webhook_info.pending_update_count}")
+                if webhook_info.url != WEBHOOK_URL:
+                    logger.warning(f"⚠️ Webhook URL mismatch! Expected: {WEBHOOK_URL}, Got: {webhook_info.url}")
+                else:
+                    logger.info("✅ Webhook URL verified successfully")
+            except Exception as verify_error:
+                logger.error(f"❌ Failed to verify webhook: {verify_error}")
+                raise
 
             # In webhook mode, the bot doesn't poll - webhooks are handled by Flask
             logger.info("✅ Bot is now configured for webhook mode")
